@@ -1,51 +1,37 @@
-from datetime import date
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from ..services.weekly_digest import generate_weekly_digest
+from ..services.digest import weekly_digest
 from ..services.cache import cache_get, cache_set
 import logging
 
 bp = Blueprint("digest", __name__)
 logger = logging.getLogger("finmind.digest")
 
-
-def _digest_cache_key(uid: int, year: int, week: int) -> str:
-    return f"user:{uid}:weekly_digest:{year}-W{week:02d}"
+DIGEST_TTL = 900  # 15 minutes
 
 
 @bp.get("/weekly")
 @jwt_required()
-def weekly_digest():
-    """Return a smart weekly financial digest with trends and insights.
+def get_weekly_digest():
+    """Return a weekly financial summary for the authenticated user.
 
     Query params:
-        year (int, optional): ISO year. Defaults to current.
-        week (int, optional): ISO week number. Defaults to current.
+        year  – ISO year  (default: current)
+        week  – ISO week  (default: current)
     """
     uid = int(get_jwt_identity())
+    year = request.args.get("year", type=int)
+    week = request.args.get("week", type=int)
 
-    today = date.today()
-    iso = today.isocalendar()
-    try:
-        year = int(request.args.get("year", iso[0]))
-        week = int(request.args.get("week", iso[1]))
-    except (ValueError, TypeError):
-        return jsonify(error="invalid year or week parameter"), 400
+    if (year is None) != (week is None):
+        return jsonify({"error": "Provide both year and week, or neither."}), 400
 
-    if not (1 <= week <= 53):
-        return jsonify(error="week must be between 1 and 53"), 400
-
-    key = _digest_cache_key(uid, year, week)
-    cached = cache_get(key)
+    cache_key = f"user:{uid}:weekly_digest:{year or 'cur'}-{week or 'cur'}"
+    cached = cache_get(cache_key)
     if cached:
         return jsonify(cached)
 
-    digest = generate_weekly_digest(uid, year, week)
-
-    # Cache for 10 minutes (current week) or 1 hour (past weeks)
-    is_current = year == iso[0] and week == iso[1]
-    ttl = 600 if is_current else 3600
-    cache_set(key, digest, ttl_seconds=ttl)
-
-    logger.info("Weekly digest served user=%s year=%s week=%s", uid, year, week)
+    digest = weekly_digest(uid, iso_year=year, iso_week=week)
+    cache_set(cache_key, digest, ttl_seconds=DIGEST_TTL)
+    logger.info("Weekly digest served user=%s week=%s", uid, digest["week"])
     return jsonify(digest)
